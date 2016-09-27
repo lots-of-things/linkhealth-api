@@ -41,6 +41,7 @@ forum_tfidf=cloudpickle.load(open("forum_tfidf.pkl", "rb" ) )
 forum_db=cloudpickle.load(open("forum_db.pkl", "rb" ) )
 cond_names=cloudpickle.load(open("condition_names.pkl", "rb" ) )
 cond_sim=cloudpickle.load(open("condition_similarity.pkl", "rb" ) )
+cond_stat=cloudpickle.load(open("condition_statistics.pkl", "rb" ) )
 
 @app.errorhandler(404)
 def not_found(error):
@@ -63,6 +64,18 @@ def find_possible_conditions(text,count):
     prob = forum_classifier.predict_proba(vec)
     parr=np.array([a[:,1] for a in prob])[:,0].tolist()
     return [a for (a,b) in sorted(zip(cond_names,parr), key=lambda x: x[1], reverse=True)[:count]]
+
+def get_clinical_occurence(condition):
+    try:
+        num=cond_stat.loc[cond_stat[0]==condition,'us_freq'].values[0]
+        rank=cond_stat['us_freq'].rank(ascending=False)[cond_stat[0]==condition].values[0]
+        if(rank>41):
+            rank=-1
+        return {'occurences':num,'rank':rank}
+    except:
+        return {'broken':'sorry broken'}
+
+
 
 def generate_similarity_csv(conditions,count):
     percond = count/len(conditions)
@@ -87,9 +100,10 @@ def generate_similarity_csv(conditions,count):
 
 
 #not implemented yet
-@app.route('/linkhealth/api/v1.0/statistics/<conditions>', methods=['GET'])
-def get_statistics(conditions):
-    return jsonify({'stats':'statistics are not working yet'})
+@app.route('/linkhealth/api/v1.0/statistics/<condition>', methods=['GET'])
+def get_statistics(condition):
+    clinic=get_clinical_occurence(condition)
+    return jsonify({'clinic':clinic})
 
 #not implemented yet
 @app.route('/linkhealth/api/v1.0/similarity/<conditions>', methods=['GET'])
