@@ -1,5 +1,7 @@
 #http://www.philchen.com/2015/08/08/how-to-make-a-scalable-python-web-app-using-flask-and-gunicorn-nginx-on-ubuntu-14-04
 
+#I know that this is the ugliest API ever written, I would fix it if I had more time
+
 #to install on ec2 Ubuntu
 #sudo /bin/dd if=/dev/zero of=/var/swap.1 bs=1M count=1024
 #sudo /sbin/mkswap /var/swap.1
@@ -63,55 +65,63 @@ def find_possible_conditions(text,count):
     vec = forum_vectorizer.transform([text])
     prob = forum_classifier.predict_proba(vec)
     parr=np.array([a[:,1] for a in prob])[:,0].tolist()
-    return [a for (a,b) in sorted(zip(cond_names,parr), key=lambda x: x[1], reverse=True)[:count]]
+    return [(a,b) for (a,b) in sorted(zip(cond_names,parr), key=lambda x: x[1], reverse=True)[:count]]
 
 def get_clinical_occurence(condition):
     try:
         num=cond_stat.loc[cond_stat[0]==condition,'us_freq'].values[0]
         rank=cond_stat['us_freq'].rank(ascending=False)[cond_stat[0]==condition].values[0]
         if(rank>41):
-            rank=-1
-        return {'occurences':num,'rank':rank}
+            return "Sorry, we don't have clinical stats on this disease yet. Check back later."
+        return "There were " +str(int(num)) +" cases of "+condition+" reported last year.  It is ranked as the " +str(int(rank))+"th most common infectious disease reported by the CDC."
     except:
-        return {'broken':'sorry broken'}
+        return "Sorry, we don't have clinical stats on this disease yet. Check back later."
 
 
 
-def generate_similarity_csv(conditions,count):
+def generate_similarity_csv(conditions,probs,count):
     percond = count/len(conditions)
-    subcond=list(conditions)
+    subset=zip(probs,conditions)
     connect = 1
-    for c in conditions:
+    for j,c in enumerate(conditions):
         sim = cond_sim[[i for i,x in enumerate(cond_names) if x == c],:][0]
         s = sorted(zip(sim,cond_names), key=lambda x: x[0], reverse=True)
         if(s[percond][0]<connect):
             connect=s[percond][0]
-        subcond.extend([b for (a,b) in s[:percond]])
+        subset.extend([(probs[j],b) for (a,b) in s[:percond]])
     if(connect<0.1):
         connect=0.1
-    subcond=list(set(subcond))
+    seen = set()
+    ans = []
+    for item in subset:
+        if item[1] not in seen:
+            ans.append(item)
+            seen.add(item[1])
+    subprob=[a for (a,b) in ans]
+    subcond=[b for (a,b) in ans]
     inds=[i for i,x in enumerate(cond_names) if x in subcond]
     subsim=cond_sim[:,inds][inds,:]
-    yield 'source,target,sim'
+    yield 'source,target,sim\n'
     for i in range(subsim.shape[0]):
         for j in range(i+1,subsim.shape[0]):
-            if(subsim[i,j]>=connect):
-                yield '%s,%s,%s' % (subcond[i], subcond[j], subsim[i,j]) +'\n'
+            if(subsim[i,j]>=connect*0.9):
+                yield '%s,%s,%s' % (subcond[i], subcond[j], (float(subprob[i])+float(subprob[j]))/2) +'\n'
 
 
-#not implemented yet
+#http://ec2-54-208-15-210.compute-1.amazonaws.com/linkhealth/api/v1.0/statistics/chlamydia
 @app.route('/linkhealth/api/v1.0/statistics/<condition>', methods=['GET'])
 def get_statistics(condition):
     clinic=get_clinical_occurence(condition)
-    return jsonify({'clinic':clinic})
+    return jsonify({'clinic':clinic, 'wiki':'No wikipedia info yet.', 'forum': 'No forum data yet.'})
 
-#not implemented yet
+#
 @app.route('/linkhealth/api/v1.0/similarity/<conditions>', methods=['GET'])
 def get_similarity(conditions):
+    probs = request.args.get('probs')
     count = request.args.get('count')
     if(not count):
         count = 10
-    return Response(generate_similarity_csv(conditions.split(';'),count), mimetype='text/csv')
+    return Response(generate_similarity_csv(conditions.split(';'),probs.split(';'),count), mimetype='text/csv')
 
 #http://127.0.0.1:5000/linkhealth/api/v1.0/experiences/%22I%20have%20some%20red%20rash%20spots%20on%20my%20thighs%22?condition=scabies
 @app.route('/linkhealth/api/v1.0/experiences/<text>', methods=['GET'])
@@ -129,8 +139,8 @@ def get_conditions(text):
     count = request.args.get('count')
     if(not count):
         count = 5
-    conditions = find_possible_conditions(text,count)
-    return jsonify({'conditions':conditions})
+    ret = find_possible_conditions(text,count)
+    return jsonify({'conditions':[a for (a,b) in ret],'probs':[b for (a,b) in ret]})
 
 
 if __name__ == '__main__':
