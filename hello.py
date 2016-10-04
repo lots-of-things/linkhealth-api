@@ -17,65 +17,50 @@
 
 
 from flask import Flask, Response, jsonify, make_response, abort, request
-import cloudpickle
+import cloudpickle, string
 import numpy as np
 
 app = Flask(__name__)
 
-import nltk, string
-
-#can also try porterstemmer or lancasterstemmer
-stemmer = nltk.stem.porter.PorterStemmer()
-remove_punctuation_map = dict((ord(char), None) for char in string.punctuation)
-
-from sklearn.feature_extraction.text import TfidfVectorizer
-
-def stem_tokens(tokens):
-    return [stemmer.stem(item) for item in tokens]
-
-def normalize(text):
-    return stem_tokens(nltk.word_tokenize(text.lower().translate(remove_punctuation_map)))
-
-
 forum_vectorizer=cloudpickle.load(open("forum_vectorizer.pkl", "rb" ) )
+forum_vecrepresent=cloudpickle.load(open("forum_vecrepresent.pkl", "rb" ) )
 forum_classifier=cloudpickle.load(open("forum_classifier.pkl", "rb" ) )
-forum_tfidf=cloudpickle.load(open("forum_tfidf.pkl", "rb" ) )
 forum_db=cloudpickle.load(open("forum_db.pkl", "rb" ) )
-cond_names=cloudpickle.load(open("condition_names.pkl", "rb" ) )
-cond_sim=cloudpickle.load(open("condition_similarity.pkl", "rb" ) )
-cond_stat=cloudpickle.load(open("condition_statistics.pkl", "rb" ) )
+disease_db=cloudpickle.load(open("disease_db.pkl", "rb" ) )
+disease_sim=cloudpickle.load(open("disease_similarity.pkl", "rb" ) )
 
 @app.errorhandler(404)
 def not_found(error):
     return make_response(jsonify({'error': 'Not found'}), 404)
 
 def find_similar_experiences(text,filters):
-    vec = forum_vectorizer.transform([text])
-    sim = forum_tfidf.dot(vec.transpose())
-    forum_db['sims']=sim.todense()
-    toret=[]
+    # vec = forum_vectorizer.transform([text])
+    words = text.encode("utf8").lower().translate(string.maketrans(string.punctuation, ' '*len(string.punctuation))).split()
+    vec = np.array([forum_vectorizer.infer_vector(words)])
+    sim = forum_vecrepresent.dot(vec.transpose())
+    forum_db['sims'] = sim
+    toret = []
     for it in forum_db.sort_values('sims',ascending=False).itertuples():
-        if (not filters) or (isinstance(it[3],str) and any(f in it[3] for f in filters)):
+        if (isinstance(it[3],str) and any(f in it[3] for f in filters)):
             toret.append({'post':it[1],'response':it[2],'label':it[3],'sim':it[4]})
         if(it[4]==0):
             break
     return toret
 
 def find_possible_conditions(text,count):
-    vec = forum_vectorizer.transform([text])
-    prob = forum_classifier.predict_proba(vec)
-    parr=np.array([a[:,1] for a in prob])[:,0].tolist()
-    return [(a,b) for (a,b) in sorted(zip(cond_names,parr), key=lambda x: x[1], reverse=True)[:count]]
+    # vec = forum_vectorizer.transform([text])
+    words = text.encode("utf8").lower().translate(string.maketrans(string.punctuation, ' '*len(string.punctuation))).split()
+    vec = np.array([forum_vectorizer.infer_vector(words)])
+    predict_prob = forum_classifier.predict_proba(vec)
+    prob_condition=predict_prob.tolist()[0]
+    return sorted([(disease_db[i]['name'],p) for i,p in enumerate(prob_condition)],key=lambda x: -x[1])[:count]
+
 
 def get_clinical_occurence(condition):
-    try:
-        num=cond_stat.loc[cond_stat[0]==condition,'us_freq'].values[0]
-        rank=cond_stat['us_freq'].rank(ascending=False)[cond_stat[0]==condition].values[0]
-        if(rank>41):
-            return "Sorry, we don't have clinical stats on this disease yet. Check back later."
-        return "There were " +str(int(num)) +" cases of "+condition+" reported last year.  It is ranked as the " +str(int(rank))+"th most common infectious disease reported by the CDC."
-    except:
-        return "Sorry, we don't have clinical stats on this disease yet. Check back later."
+    lookup=[(i,d['clin_freq']) for i,d in enumerate(sorted(disease_db,key=lambda x: -x['clin_freq'])) if d['name']==condition]
+    if(len(lookup)==0):
+        return "Sorry, we don't have clinical stats on "+condition+" yet. Check back later."
+    return "There were " +str(int(lookup[0][1])) +" cases of "+condition+" reported last year.  It is ranked as the " +str(int(1+lookup[0][0]))+"th most common infectious disease reported by the CDC."
 
 
 
@@ -112,35 +97,42 @@ def generate_similarity_csv(conditions,probs,count):
 @app.route('/linkhealth/api/v1.0/statistics/<condition>', methods=['GET'])
 def get_statistics(condition):
     clinic=get_clinical_occurence(condition)
-    return jsonify({'clinic':clinic, 'wiki':'No wikipedia info yet.', 'forum': 'No forum data yet.'})
+    wiki='No wikipdeia info yet'
+    forum='No forum data yet.'
+    return jsonify({'clinic':clinic, 'wiki':wikie, 'forum': forum})
 
-#
-@app.route('/linkhealth/api/v1.0/similarity/<conditions>', methods=['GET'])
-def get_similarity(conditions):
-    probs = request.args.get('probs')
-    count = request.args.get('count')
-    if(not count):
-        count = 10
+
+# explain yourself
+@app.route('/linkhealth/api/v1.0/similarity/<conditions>/<probs>', methods=['GET'])
+def get_similarity_default(conditions,probs):
+    return get_similarity(conditions,probs,10)
+
+@app.route('/linkhealth/api/v1.0/similarity/<conditions>/<probs>/<count>', methods=['GET'])
+def get_similarity(conditions,probs,count):
     return Response(generate_similarity_csv(conditions.split(';'),probs.split(';'),count), mimetype='text/csv')
 
-#http://127.0.0.1:5000/linkhealth/api/v1.0/experiences/%22I%20have%20some%20red%20rash%20spots%20on%20my%20thighs%22?condition=scabies
+
+#http://127.0.0.1:5000/linkhealth/api/v1.0/experiences/%22I%20have%20some%20red%20rash%20spots%20on%20my%20thighs%22/condition=scabies
 @app.route('/linkhealth/api/v1.0/experiences/<text>', methods=['GET'])
-def get_experiences(text):
-    condition = request.args.get('condition')
-    if(condition):
-        sim_exp = find_similar_experiences(text,condition.split(';'))
-    else:
-        sim_exp = find_similar_experiences(text,[])
+def get_experiences_default(text):
+    return get_experiences(text,"")
+
+@app.route('/linkhealth/api/v1.0/experiences/<text>/<conditions>', methods=['GET'])
+def get_experiences(text,conditions):
+    sim_exp = find_similar_experiences(text,conditions.split(';'))
     return jsonify({'sim_exp': sim_exp})
+
 
 #http://127.0.0.1:5000/linkhealth/api/v1.0/conditions/"I have some red rash spots on my thighs"
 @app.route('/linkhealth/api/v1.0/conditions/<text>', methods=['GET'])
-def get_conditions(text):
-    count = request.args.get('count')
-    if(not count):
-        count = 5
+def get_condition_default(text):
+    return get_conditions(text,5)
+
+@app.route('/linkhealth/api/v1.0/conditions/<text>/<count>', methods=['GET'])
+def get_conditions(text,count):
     ret = find_possible_conditions(text,count)
     return jsonify({'conditions':[a for (a,b) in ret],'probs':[b for (a,b) in ret]})
+
 
 
 if __name__ == '__main__':
